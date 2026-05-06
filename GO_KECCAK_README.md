@@ -1,4 +1,4 @@
-# Legacy Keccak-256 for Go with SIMD (c2goasm)
+# Legacy Keccak-256 for Go with SIMD
 
 This provides **legacy Keccak-256** (Ethereum-compatible, **NOT** FIPS 202 SHA3-256) with SIMD acceleration for Go on AMD64.
 
@@ -7,9 +7,9 @@ This provides **legacy Keccak-256** (Ethereum-compatible, **NOT** FIPS 202 SHA3-
 - ✅ **Legacy Keccak-256** (0x01 padding suffix) - compatible with Ethereum
 - ✅ **AVX2 support** - 4-way parallel hashing (times4)
 - ✅ **AVX512 support** - 8-way parallel hashing (times8)
-- ✅ **No CGo** - pure Go + assembly
+- ✅ **No CGo** - pure Go + Plan 9 assembly glue calling pre-linked `.syso` blobs
 - ✅ **Runtime CPU detection** - automatically uses best implementation
-- ⚠️ **AMD64 only** - c2goasm limitation
+- ⚠️ **linux/amd64 only** - the `.syso` blobs are ELF AMD64 objects
 
 ## Important: Legacy vs FIPS 202
 
@@ -22,16 +22,10 @@ For FIPS 202 SHA3-256, use `golang.org/x/crypto/sha3` instead.
 ## Prerequisites
 
 ```bash
-# Install dependencies
+# Install dependencies (C toolchain + xsltproc for XKCP's Makefile generator)
 sudo apt-get install build-essential xsltproc  # Ubuntu/Debian
 # or
 brew install xsltproc  # macOS
-
-# Install c2goasm
-go install github.com/minio/c2goasm@latest
-
-# Verify c2goasm is in PATH
-which c2goasm
 ```
 
 ## Build Instructions
@@ -58,13 +52,16 @@ The files should already be in the XKCP directory:
 ```
 
 This will:
-1. Build XKCP AVX2 and AVX512 libraries
-2. Compile the wrapper to assembly
-3. Convert to Go assembly with c2goasm
-4. Create .syso files for linking
-5. Generate Go package files
+1. Build XKCP AVX2 (times4) and AVX512 (times8) libraries
+2. Compile C wrappers that bridge Go slice layout to the XKCP API
+3. Combine wrapper + XKCP objects with `ld -r`, then fully link with `ld`
+   to resolve every relocation (Go's internal linker cannot resolve
+   `R_X86_64_PLT32` / cross-section `R_X86_64_PC32` in `.syso` files)
+4. `objcopy` the linked output back into an ET_REL ELF — the relocation-free
+   `.syso` blob the Go linker accepts
+5. Emit the Plan 9 assembly glue stubs that `CALL` into each blob
 
-Output goes to `go_keccak/` directory.
+Output goes to the `go_keccak/` directory.
 
 ### Step 4: Test the example
 
@@ -165,21 +162,14 @@ Performance varies by message size and CPU model.
 go_keccak/
 ├── keccak.go                  # Public API
 ├── keccak_amd64.go            # AMD64-specific declarations
-├── keccak_avx2_amd64.s        # AVX2 wrapper assembly (c2goasm output)
-├── keccak_avx512_amd64.s      # AVX512 wrapper assembly (c2goasm output)
-├── keccak_times4_amd64.syso   # AVX2 core implementation
-├── keccak_times8_amd64.syso   # AVX512 core implementation
+├── keccak_times4_amd64.s      # Plan 9 glue calling into the times4 blob
+├── keccak_times8_amd64.s      # Plan 9 glue calling into the times8 blob
+├── keccak_times4_amd64.syso   # AVX2 core, fully pre-linked, relocation-free
+├── keccak_times8_amd64.syso   # AVX512 core, fully pre-linked, relocation-free
 └── go.mod
 ```
 
 ## Troubleshooting
-
-### "c2goasm: command not found"
-
-```bash
-go install github.com/minio/c2goasm@latest
-export PATH=$PATH:$(go env GOPATH)/bin
-```
 
 ### "make: xsltproc: Command not found"
 
@@ -209,17 +199,18 @@ FIPS 202 SHA3-256 (different!):
 
 ## Limitations
 
-1. **AMD64 only** - c2goasm does not support ARM64 or other architectures
-2. **Stack usage** - Limited to ~100 bytes (should be fine for XKCP)
-3. **Maintenance** - Assembly needs regeneration if XKCP updates
+1. **linux/amd64 only** - the `.syso` blobs are ELF AMD64 objects; other
+   platforms must fall back to a pure-Go Keccak implementation
+2. **Maintenance** - the `.syso` blobs need regeneration if XKCP updates;
+   the Plan 9 glue only needs touching if XKCP entry-symbol names change
 
 ## Alternative Approaches
 
 If you need multi-architecture support, consider:
 
 1. **Pure Go fallback** - Implement Keccak in pure Go for non-AMD64
-2. **.syso method** - Pre-compile XKCP for each target architecture
-3. **CGo** - Use CGo to link XKCP directly (loses static compilation)
+2. **Per-arch .syso** - Re-run this pipeline targeting each architecture
+3. **CGo** - Link XKCP directly (loses static, CGO-free compilation)
 
 ## License
 
@@ -229,7 +220,6 @@ If you need multi-architecture support, consider:
 ## References
 
 - [XKCP GitHub](https://github.com/XKCP/XKCP)
-- [c2goasm](https://github.com/minio/c2goasm)
 - [Keccak Team](https://keccak.team/)
 - [Ethereum Keccak-256](https://ethereum.org/en/developers/docs/apis/json-rpc/#eth_sign)
 
